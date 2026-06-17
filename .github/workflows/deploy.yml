@@ -1,0 +1,136 @@
+name: CI/CD Deploy Flask Behind Nginx
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/**'
+      - 'docker-compose.yml'
+  workflow_dispatch:
+    inputs:
+      target_instance:
+        description: 'Which instance to update: app1, app2, or both'
+        required: true
+        default: 'app1'
+        type: choice
+        options:
+          - app1
+          - app2
+          - both
+      app_version:
+        description: 'Version string to bake into the updated instance'
+        required: true
+        default: '1.0'
+
+env:
+  DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+  IMAGE_NAME: flask-app
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      tag1: ${{ steps.tags.outputs.tag1 }}
+      tag2: ${{ steps.tags.outputs.tag2 }}
+      ver1: ${{ steps.tags.outputs.ver1 }}
+      ver2: ${{ steps.tags.outputs.ver2 }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Determine target and tags
+        id: tags
+        run: |
+          TARGET="${{ github.event.inputs.target_instance || 'app1' }}"
+          VERSION="${{ github.event.inputs.app_version || '1.0' }}"
+          SHA_TAG="${GITHUB_SHA::8}"
+
+          echo "tag1=app1-${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "tag2=app2-${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "ver1=$( [ "$TARGET" = "app1" ] || [ "$TARGET" = "both" ] && echo $VERSION || echo "KEEP" )" >> $GITHUB_OUTPUT
+          echo "ver2=$( [ "$TARGET" = "app2" ] || [ "$TARGET" = "both" ] && echo $VERSION || echo "KEEP" )" >> $GITHUB_OUTPUT
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image (instance 1)
+        if: ${{ github.event.inputs.target_instance == 'app1' || github.event.inputs.target_instance == 'both' || github.event_name == 'push' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app:${{ steps.tags.outputs.tag1 }}
+
+      - name: Build and push image (instance 2)
+        if: ${{ github.event.inputs.target_instance == 'app2' || github.event.inputs.target_instance == 'both' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app:${{ steps.tags.outputs.tag2 }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Copy docker-compose.yml to VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: "docker-compose.yml"
+          target: "/home/${{ secrets.VM_USER }}/flask-deploy"
+
+      - name: Update .env and deploy on VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/${{ secrets.VM_USER }}/flask-deploy
+
+            TARGET="${{ github.event.inputs.target_instance || 'app1' }}"
+            NEW_TAG1="${{ needs.build-and-push.outputs.tag1 }}"
+            NEW_TAG2="${{ needs.build-and-push.outputs.tag2 }}"
+            NEW_VER1="${{ needs.build-and-push.outputs.ver1 }}"
+            NEW_VER2="${{ needs.build-and-push.outputs.ver2 }}"
+
+            touch .env
+            CUR_TAG1=$(grep '^APP1_IMAGE_TAG=' .env | cut -d= -f2 || echo "")
+            CUR_TAG2=$(grep '^APP2_IMAGE_TAG=' .env | cut -d= -f2 || echo "")
+            CUR_VER1=$(grep '^APP1_VERSION=' .env | cut -d= -f2 || echo "1.0")
+            CUR_VER2=$(grep '^APP2_VERSION=' .env | cut -d= -f2 || echo "1.0")
+
+            if [ "$TARGET" = "app1" ] || [ "$TARGET" = "both" ]; then
+              FINAL_TAG1="$NEW_TAG1"; FINAL_VER1="$NEW_VER1"
+            else
+              FINAL_TAG1="$CUR_TAG1"; FINAL_VER1="$CUR_VER1"
+            fi
+
+            if [ "$TARGET" = "app2" ] || [ "$TARGET" = "both" ]; then
+              FINAL_TAG2="$NEW_TAG2"; FINAL_VER2="$NEW_VER2"
+            else
+              FINAL_TAG2="$CUR_TAG2"; FINAL_VER2="$CUR_VER2"
+            fi
+
+            cat > .env <<EOF
+            DOCKERHUB_USER=${{ secrets.DOCKERHUB_USERNAME }}
+            APP1_IMAGE_TAG=${FINAL_TAG1}
+            APP2_IMAGE_TAG=${FINAL_TAG2}
+            APP1_VERSION=${FINAL_VER1}
+            APP2_VERSION=${FINAL_VER2}
+            EOF
+
+            docker compose pull
+            docker compose up -d
+            docker compose ps
