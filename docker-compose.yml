@@ -1,0 +1,20 @@
+services:
+  flask-app-1:
+    image: ${DOCKERHUB_USER}/flask-app:${APP1_IMAGE_TAG}
+    container_name: flask-app-1
+    restart: unless-stopped
+    environment:
+      - INSTANCE_NAME=flask-app-1
+      - APP_VERSION=${APP1_VERSION}
+    ports:
+      - "8001:8000"
+
+  flask-app-2:
+    image: ${DOCKERHUB_USER}/flask-app:${APP2_IMAGE_TAG}
+    container_name: flask-app-2
+    restart: unless-stopped
+    environment:
+      - INSTANCE_NAME=flask-app-2
+      - APP_VERSION=${APP2_VERSION}
+    ports:
+      - "8002:8000"
