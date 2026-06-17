@@ -51,7 +51,7 @@ jobs:
           echo "ver2=$( [ "$TARGET" = "app2" ] || [ "$TARGET" = "both" ] && echo $VERSION || echo "KEEP" )" >> $GITHUB_OUTPUT
           echo "target=$TARGET" >> $GITHUB_OUTPUT
 
-    -  name: Debug secret length
+      - name: Debug secret length
         run: |
           echo "Username length: ${#DOCKERHUB_USER}"
           echo "Token length: ${#DOCKERHUB_TOKEN}"
